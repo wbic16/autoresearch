@@ -40,14 +40,17 @@ PHEXT_URL   = os.environ.get("PHEXT_URL",   "http://localhost:8090")
 PHEXT_TOKEN = os.environ.get("PHEXT_TOKEN", "Mirrorborn")
 PHEXT_NODE  = int(os.environ.get("PHEXT_NODE", "1"))   # 1=Theia, 2=Phex, …
 
-# Live telemetry: 9 progress buckets within the node's section
-#   9.1.1/1.1.N/bucket.1.1  (chapter = bucket 1-9, tracks run progress)
-def _telemetry_coord(bucket: int) -> str:
-    return f"9.1.1/1.1.{PHEXT_NODE}/{bucket}.1.1"
+# vTPU home coordinate in the lattice: 8.6.7/5.3.9/9.9.9
+# Node experiment results live in subspace: 8.6.7/5.3.9/N.1.1  (chapter=node)
+# Live telemetry buckets:                   8.6.7/5.3.9/N.B.1  (section=bucket)
+VTPU_HOME   = "8.6.7/5.3.9/9.9.9"
 
-# Final result: scroll 9 = current best for this node
-#   9.1.1/1.1.N/1.1.9
-RESULT_COORD = f"9.1.1/1.1.{PHEXT_NODE}/1.1.9"
+def _telemetry_coord(bucket: int) -> str:
+    """Live progress: chapter=node, section=bucket (1-9 over 5 min run)."""
+    return f"8.6.7/5.3.9/{PHEXT_NODE}.{bucket}.1"
+
+# Final result for this node
+RESULT_COORD = f"8.6.7/5.3.9/{PHEXT_NODE}.1.1"
 
 def phext_write(coord: str, content: str, silent: bool = True) -> bool:
     payload = json.dumps({"coordinate": coord, "content": content}).encode()
