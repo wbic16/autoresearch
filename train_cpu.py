@@ -21,7 +21,9 @@ os.environ["PYTORCH_ALLOC_CONF"] = "expandable_segments:True"
 os.environ["HF_HUB_DISABLE_PROGRESS_BARS"] = "1"
 
 import gc
+import json
 import time
+import urllib.request
 from dataclasses import dataclass, asdict
 
 import torch
@@ -29,6 +31,53 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 from prepare import MAX_SEQ_LEN, TIME_BUDGET, Tokenizer, make_dataloader, evaluate_bpb
+
+# ---------------------------------------------------------------------------
+# phext-lattice sync (SO9 live telemetry → mirrorborn.us)
+# ---------------------------------------------------------------------------
+
+PHEXT_URL   = os.environ.get("PHEXT_URL",   "http://localhost:8090")
+PHEXT_TOKEN = os.environ.get("PHEXT_TOKEN", "Mirrorborn")
+PHEXT_NODE  = int(os.environ.get("PHEXT_NODE", "1"))   # 1=Theia, 2=Phex, …
+
+# Live telemetry coord: section = step progress (1-9 buckets)
+def _telemetry_coord(bucket: int) -> str:
+    return f"9.1.1/1.1.{PHEXT_NODE}/{bucket}.1.1"
+
+# Final result coord: 9.1.1/1.1.N/1.1.1
+RESULT_COORD = f"9.1.1/1.1.{PHEXT_NODE}/1.1.1"
+
+def phext_write(coord: str, content: str, silent: bool = True) -> bool:
+    payload = json.dumps({"coordinate": coord, "content": content}).encode()
+    req = urllib.request.Request(
+        f"{PHEXT_URL}/api/update",
+        data=payload,
+        headers={"authorization": PHEXT_TOKEN, "content-type": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=3) as r:
+            ok = json.loads(r.read()).get("ok", False)
+            if not silent:
+                print(f"[phext] wrote to {coord}: {'ok' if ok else 'fail'}")
+            return ok
+    except Exception as e:
+        if not silent:
+            print(f"[phext] error: {e}")
+        return False
+
+def phext_save() -> bool:
+    req = urllib.request.Request(
+        f"{PHEXT_URL}/api/save",
+        data=b"",
+        headers={"authorization": PHEXT_TOKEN},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=3) as r:
+            return json.loads(r.read()).get("ok", False)
+    except Exception:
+        return False
 
 # ---------------------------------------------------------------------------
 # Device selection: CUDA → ROCm (also appears as CUDA in PyTorch) → CPU
@@ -211,6 +260,16 @@ print(f"Training for {TIME_BUDGET}s...")
 training_start = time.perf_counter()
 step = 0
 total_tokens = 0
+_last_sync_bucket = 0
+
+# Initial sync — announce experiment start
+import subprocess, sys
+_commit = subprocess.run(["git","rev-parse","--short","HEAD"],
+    capture_output=True,text=True).stdout.strip()
+phext_write(_telemetry_coord(1),
+    f"[START] node={PHEXT_NODE} commit={_commit} "
+    f"layers={config.n_layer} heads={config.n_head} embd={config.n_embd} "
+    f"seq={seq_len} batch={DEVICE_BATCH_SIZE}×{GRAD_ACCUM}", silent=False)
 
 model.train()
 optimizer.zero_grad()
@@ -241,6 +300,13 @@ while True:
 
     if step % 20 == 0:
         print(f"  step {step} | loss {loss.item():.4f} | lr {lr:.2e} | {elapsed:.0f}s elapsed")
+        # Live telemetry to phext-lattice (9 buckets over 5-minute run)
+        bucket = min(9, int(progress * 9) + 1)
+        if bucket != _last_sync_bucket:
+            _last_sync_bucket = bucket
+            phext_write(_telemetry_coord(bucket),
+                f"step={step} loss={loss.item():.4f} lr={lr:.2e} "
+                f"elapsed={elapsed:.0f}s tokens={total_tokens/1e6:.1f}M")
 
 training_end = time.perf_counter()
 training_seconds = training_end - training_start
@@ -270,3 +336,24 @@ print(f"num_steps:        {step}")
 print(f"num_params_M:     {n_params:.1f}")
 print(f"depth:            {config.n_layer}")
 print(f"device:           {device_type}")
+
+# Final sync to phext-lattice — result scroll at node result coord
+import datetime
+_result_text = (
+    f"[RESULT] {datetime.datetime.now().strftime('%Y-%m-%d %H:%M CT')}\n"
+    f"commit:       {_commit}\n"
+    f"val_bpb:      {val_bpb:.6f}\n"
+    f"params_M:     {n_params:.1f}\n"
+    f"depth:        {config.n_layer}\n"
+    f"n_head:       {config.n_head}\n"
+    f"n_embd:       {config.n_embd}\n"
+    f"seq_len:      {seq_len}\n"
+    f"peak_mem_mb:  {peak_mem:.1f}\n"
+    f"tokens_M:     {total_tokens/1e6:.1f}\n"
+    f"steps:        {step}\n"
+    f"device:       {device_type}\n"
+)
+print("\n[phext] writing final result...")
+phext_write(RESULT_COORD, _result_text, silent=False)
+phext_save()
+print("[phext] saved vtpu-results.phext")
