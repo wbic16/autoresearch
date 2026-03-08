@@ -51,17 +51,31 @@ NODE_PIPES = {
 # Heartbeat hour → label
 HEARTBEAT_LABELS = {8: "morning", 17: "evening", 0: "midnight"}
 
-# S9RP coordinates
-def node_coord(node_id: int) -> str:
+# S9RP coordinate scheme (all within 9.x.x space)
+#
+#   9.1.1/1.1.N/1.1.1  — node N morning heartbeat   (section=N, scroll=1)
+#   9.1.1/1.1.N/1.1.2  — node N evening heartbeat   (section=N, scroll=2)
+#   9.1.1/1.1.N/1.1.3  — node N midnight heartbeat  (section=N, scroll=3)
+#   9.1.1/1.1.N/1.1.9  — node N latest result       (section=N, scroll=9)
+#   9.1.1/1.1.1/1.1.N  — node N overnight log       (book=1, scroll=N)
+#   9.1.1/1.1.9/1.1.9  — collapse coordinate
+
+def node_log_coord(node_id: int) -> str:
+    """Overnight experiment log: one scroll per node in book 1."""
     return f"9.1.1/1.1.1/1.1.{node_id}"
+
+def node_result_coord(node_id: int) -> str:
+    """Latest result for node N (scroll 9 = current best)."""
+    return f"9.1.1/1.1.{node_id}/1.1.9"
 
 COLLAPSE_COORD = "9.1.1/1.1.9/1.1.9"
 
+# scroll 1=morning, 2=evening, 3=midnight within each node's section
+_HEARTBEAT_SCROLL = {8: 1, 17: 2, 0: 3}
+
 def heartbeat_coord(node_id: int, hour: int) -> str:
-    # Map hour to a stable coordinate: morning=8, evening=5, midnight=3 (normalized from 12)
-    h_map = {8: 8, 17: 5, 0: 3}
-    h = h_map.get(hour, hour % 9 + 1)
-    return f"{h}.1.1/1.1.1/1.1.{node_id}"
+    scroll = _HEARTBEAT_SCROLL.get(hour, 1)
+    return f"9.1.1/1.1.{node_id}/1.1.{scroll}"
 
 
 # ── phext-lattice API ───────────────────────────────────────────────────────────
@@ -160,7 +174,7 @@ def run_heartbeat(node_id: int, collapse: bool = False):
     status_lines = [
         f"[{now.strftime('%Y-%m-%d %H:%M CT')}] {label.upper()} HEARTBEAT",
         f"Node:       {node_name} ({pipe})",
-        f"Coord:      {node_coord(node_id)}",
+        f"Coord:      {node_log_coord(node_id)}",
         "",
         f"Current run:  val_bpb = {val_bpb_now}",
         f"Best ever:    val_bpb = {best['val_bpb'] if best else 'no results yet'}",
@@ -179,14 +193,14 @@ def run_heartbeat(node_id: int, collapse: bool = False):
     status = "\n".join(status_lines)
     print(status)
 
-    # Write to heartbeat coordinate
+    # Write to heartbeat coordinate (morning/evening/midnight scroll within node's section)
     hb_coord = heartbeat_coord(node_id, hour)
     ok = phext_write(hb_coord, status)
     print(f"\n[phext] wrote to {hb_coord}: {'ok' if ok else 'FAILED'}")
 
-    # Also write latest to node's S9RP coordinate
-    ok2 = phext_write(node_coord(node_id), status)
-    print(f"[phext] wrote to {node_coord(node_id)}: {'ok' if ok2 else 'FAILED'}")
+    # Also write to node's overnight log coordinate
+    ok2 = phext_write(node_log_coord(node_id), status)
+    print(f"[phext] wrote to {node_log_coord(node_id)}: {'ok' if ok2 else 'FAILED'}")
 
     # Morning collapse
     if collapse and label == "morning":
@@ -211,11 +225,11 @@ def run_collapse(reporting_node: int, local_results: list[dict]):
                 "text": f"commit={own_best['commit']} | {own_best['description']}",
             }
 
-    # Read other nodes (they write their best to their S9RP coord)
+    # Read other nodes from their result coords (9.1.1/1.1.N/1.1.9)
     for n in range(1, 10):
         if n == reporting_node:
             continue
-        content = phext_read(node_coord(n))
+        content = phext_read(node_result_coord(n))
         if not content:
             continue
         # Parse val_bpb line from status
